@@ -88,7 +88,8 @@ def run(args, *, build_model, measure_model, train_epoch_fn=train_epoch,
                    torch_version=str(torch.__version__), torchvision_version=str(torchvision.__version__),
                    timm_version=timm.__version__, python_version=platform.python_version(),
                    cpu_threads=torch.get_num_threads(), image_size=args.image_size,
-                   pretrained=False, amp=False, tf32=False)
+                   pretrained=False, amp=False, tf32=False,
+                   fixed_train_hash=getattr(args, "fixed_train_hash", None))
     (output / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     with (output / "metrics.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(metrics))

@@ -16,6 +16,7 @@ class Quantizer(nn.Module):
             raise ValueError("Supported bit widths: 2, 3, 4, 8")
         self.bits = bits
         self.frozen = False
+        self.calibrating = False
         kwargs = dict(quant_min=0, quant_max=2**bits - 1, dtype=torch.quint8)
         if weight:
             kwargs.update(observer=MovingAveragePerChannelMinMaxObserver,
@@ -26,10 +27,10 @@ class Quantizer(nn.Module):
         self.fake_quant = FakeQuantize(**kwargs)
 
     def forward(self, x):
-        self.fake_quant.enable_observer(self.training and not self.frozen)
+        self.fake_quant.enable_observer((self.training or self.calibrating) and not self.frozen)
         observed_min = self.fake_quant.activation_post_process.min_val
-        if not self.training and (observed_min.numel() == 0 or torch.isinf(observed_min).any()):
-            raise RuntimeError("QAT evaluation requires trained/calibrated observer state")
+        if not self.training and not self.calibrating and (observed_min.numel() == 0 or not torch.isfinite(observed_min).all()):
+            raise RuntimeError("Quantized evaluation requires trained/calibrated observer state")
         return self.fake_quant(x)
 
 

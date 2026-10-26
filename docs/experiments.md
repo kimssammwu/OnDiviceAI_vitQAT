@@ -34,8 +34,90 @@ Food-101 파일은 `data/food-101/{images,meta}`에서 읽는다. `--download`�
 `--model vit_tiny_patch16_224`가 기본 모델이며, `--model vit_small_patch16_224`처럼
 표준 timm ViT 아키텍처를 지정할 수 있다. `--experiment`는 결과에 저장할 자유로운 실험명이다.
 생략하면 Cropr off에서는 FP32=`1-1`, QAT=`1-2`, Cropr on에서는 `cropr_fp32`/`cropr_qat`로 기록한다.
-실험명은 모델 동작을 바꾸지 않는다. Cropr FP32 실행에는 PTQ가 포함되지 않는다.
+실험명은 모델 동작을 바꾸지 않는다. Cropr FP32 학습 뒤 PTQ는 아래 `--mode ptq`로 별도 실행한다.
 기존 `python -m experiments.train` 명령은 `python -m vitqat.train`으로 변경되었다.
+
+## 실험 2-a: Cropr FP32 → PTQ
+
+회의록의 이민우 담당 실험이다. **scratch FP32 Cropr 학습 → best checkpoint 선택 →
+학습 데이터 일부로 PTQ 보정 → FP32/PTQ test 비교** 순서로 실행한다.
+기존 FP32 학습 및 체크포인트 형식을 재사용하며, PTQ 단계에서 optimizer나 backward를 실행하지 않는다.
+
+FP32 Cropr 학습 결과가 없다면 기존 학습 코드를 그대로 실행한다.
+
+```powershell
+python -m vitqat.train --mode fp32 --use-cropr --cropr-pruning-rate 8 --data-root data --download --output runs/2-a_cropr_fp32 --device cuda
+```
+
+학습이 끝나면 **2bit를 먼저** 평가한다. `--weight-bits`와 `--activation-bits`의 기본값은 모두 2이다.
+PTQ는 체크포인트에서 Cropr 사용 여부와 구조를 가져오므로 `--use-cropr`를 다시 지정할 필요가 없다.
+
+```powershell
+python -m vitqat.train --mode ptq --fp32-checkpoint runs/2-a_cropr_fp32/best.pt --data-root data --output runs/2-a_ptq_w2a2 --device cuda
+python -m vitqat.train --mode ptq --fp32-checkpoint runs/2-a_cropr_fp32/best.pt --weight-bits 4 --activation-bits 4 --data-root data --output runs/2-a_ptq_w4a4 --device cuda
+```
+
+가중치와 activation bit는 독립적이다. 팀이 W4A8을 비교 조건으로 정하면 두 번째 명령의
+`--activation-bits 4`를 `--activation-bits 8`로 변경한다. FP32 모델을 다시 학습할 필요는 없다.
+지원 bit는 기존 QAT와 동일한 2/3/4/8이며, 2-a의 우선 실험은 W2A2와 W4A4이다.
+
+| PTQ 옵션 | 기본값 / 의미 |
+|---|---|
+| `--fp32-checkpoint` | 필수. 기존 FP32 Cropr 학습의 `best.pt` 또는 `last.pt`. QAT checkpoint와 weight-only `model_state.pt`는 입력으로 쓰지 않는다. |
+| `--calibration-samples` | 1024. 학습 split에서 seed로 무작위 추출하는 최대 이미지 수. 남은 이미지가 더 적으면 전부 사용한다. |
+| `--ptq-scope all` | 기본값. 기존 QAT all과 동일한 양자화 대상(ViT 및 Cropr scorer). |
+| `--ptq-scope backbone` | ViT만 양자화하며 Cropr 모듈은 FP32로 유지. 비교하는 QAT scope도 동일하게 맞춘다. |
+| `--batch-size`, `--workers`, `--threads` | 보정 및 평가 실행 설정. 학습 때와 달라도 된다. |
+
+모델명, 입력 크기, Cropr pruning rate/LLF, seed, validation 비율 및 학습 설정은 **원본 checkpoint 설정을 우선**한다.
+CLI에서 이 값을 바꿔도 PTQ 모델 구조/분할을 변경하지 않는다. 따라서 학습 때의 epochs나 pruning 옵션을
+다시 입력하지 않는다. 데이터 경로, download, 장치, batch/workers/threads, latency 측정 설정,
+실험명, output, PTQ 비트와 보정 옵션은 현재 CLI 값을 사용한다.
+학습 때와 같은 Food-101 데이터 및 분할 hash가 필요하며, 불일치하면 실행을 거부한다.
+`--resume`/`--eval-checkpoint`는 PTQ에서 사용하지 않는다. 각 실행은 비어 있는 새 output을 지정한다.
+
+보정에는 **학습 split의 이미지만** 사용한다. 전처리는 평가와 같은 Resize/CenterCrop/Normalize이며
+validation/test를 관측기 통계 수집에 사용하지 않는다. Cropr와 전체 모델을 `eval()`로 유지하여
+실제 추론 scorer/pruning/LLF 경로를 보정하며 보조 학습 head는 실행하지 않는다.
+보정 동안 fake quantization을 끄고 누적 MinMax로 FP32 범위를 수집한 뒤,
+관측기를 고정하고 fake quantization을 켠다. QAT의 EMA observer와는 다른 정적 PTQ 보정이다.
+양자화 함수는 동일한 uniform affine 방식이다. 가중치는 output channel별, activation은 tensor별로 보정한다.
+보정이 끝나면 test 입력으로 scale/zero point/min/max를 갱신하지 않는다.
+
+각 PTQ output에는 다음을 저장한다.
+
+- `config.json`, `split.json`: 실제 적용한 설정과 원본 학습 분할.
+- `calibration.json`: 선택한 학습 이미지 인덱스, seed, 실제 보정 이미지/배치 수 및 관측한 quantizer 목록.
+- `fp32_metrics.json`: 같은 원본 checkpoint를 이 실행 환경에서 평가한 FP32 기준 결과.
+- `metrics.json`, `metrics.csv`: PTQ 결과. `fp32_top1_acc`, `top1_drop_pp`(FP32 − PTQ, %p),
+  `weight_updates=0`, 실제 비트, scope, 원본 checkpoint SHA-256 등을 포함한다.
+- `model_state.pt`: FP32 master weight와 고정된 PTQ quantizer 상태.
+- `ptq.pt`: 모델 구조 설정과 보정 정보를 포함하는 재로딩용 checkpoint. optimizer 상태는 포함하지 않는다.
+
+`fp32_metrics.json`의 `storage_serialized_state_bytes`는 FP32 state dict를 메모리에서 직렬화한 바이트 수이고,
+PTQ의 `storage_model_state_bytes`는 실제 저장 파일 크기이다. 두 값 모두 저비트 packed 모델 크기가 아니다.
+packed 크기의 이론 추정은 각각 `storage_estimated_packed_bytes`로 비교한다.
+
+보정한 모델은 원래 데이터나 FP32 checkpoint 없이 다음처럼 다시 로드한다.
+
+```python
+import torch
+from vitqat.ptq import load_ptq_checkpoint
+
+model = load_ptq_checkpoint("runs/2-a_ptq_w2a2/ptq.pt", device="cuda")
+with torch.inference_mode():
+    logits = model(images)  # 학습/평가와 동일하게 전처리한 입력
+```
+
+이 경로는 **PTQ 정확도 실험을 위한 부동소수점 fake quantization**이다. 실제 INT2/INT4 kernel이나
+packed export를 제공하지 않는다. latency는 `fake_quant_fp32`, `integer_latency_ms`는 `null`이며,
+fake quantization latency를 실제 저비트 추론 가속으로 해석하지 않는다.
+실제 Food-101 정확도와 수렴은 전체 학습 및 PTQ 평가를 완료한 뒤 보고한다.
+
+검증은 `python -m pytest tests/test_ptq.py -q`로 실행한다.
+보정/평가 중 가중치 보존, 추론 모드 유지, 관측기 고정, 2/4bit와 scope/LLF,
+원본 설정 승계, 분할 불일치 거부, 저장/재로딩 및 FP32/PTQ 비교 경로를 확인한다.
+참고: [PyTorch 2.3 정적 PTQ와 보정](https://docs.pytorch.org/docs/2.3/quantization.html#post-training-static-quantization).
 
 ## 코드 확장 방법
 
@@ -49,6 +131,7 @@ vitqat/
   models.py         # 모델 선택 및 QAT 적용
   cropr_adapter.py  # 원본 파일 수정 없이 기존 Cropr 모델 생성/연결
   quantization.py   # quantizer와 QAT 연산
+  ptq.py            # FP32 checkpoint 로드, PTQ 보정/비교 평가/저장/재로딩
   data.py           # Food-101 split, 전처리, loader
   training.py       # 학습/평가 step, scheduler, checkpoint
   runner.py         # epoch 반복, best 모델 선택, 결과 저장

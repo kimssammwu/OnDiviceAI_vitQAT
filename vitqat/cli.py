@@ -7,10 +7,10 @@ from .augment import AUGMENT_DEFAULTS
 
 
 def parser():
-    p = argparse.ArgumentParser(description="Food-101 scratch ViT training")
+    p = argparse.ArgumentParser(description="Food-101 scratch ViT training and Cropr PTQ evaluation")
     p.add_argument("--experiment", help="Optional label stored with results")
     p.add_argument("--model", default="vit_tiny_patch16_224", help="timm VisionTransformer architecture")
-    p.add_argument("--mode", choices=["fp32", "qat"], required=True)
+    p.add_argument("--mode", choices=["fp32", "qat", "ptq"], required=True)
     p.add_argument("--weight-bits", type=int, choices=[2, 3, 4, 8], default=2)
     p.add_argument("--activation-bits", type=int, choices=[2, 3, 4, 8], default=2)
     p.add_argument("--use-cropr", action=argparse.BooleanOptionalAction, default=False)
@@ -19,12 +19,19 @@ def parser():
     p.add_argument("--cropr-llf", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--qat-scope", choices=["all", "backbone"], default="all",
                    help="all also quantizes Cropr; backbone leaves Cropr in FP32")
+    p.add_argument("--fp32-checkpoint", help="Trained FP32 Cropr best.pt used by --mode ptq")
+    p.add_argument("--calibration-samples", type=int, default=1024,
+                   help="Maximum training images used for PTQ calibration; no validation/test images")
+    p.add_argument("--ptq-scope", choices=["all", "backbone"], default="all",
+                   help="PTQ scope; all matches the default Cropr QAT quantization targets")
     p.add_argument("--aux-loss-weight", type=float, default=1.0,
                    help="Weight of each Cropr auxiliary loss (original Cropr: 1.0)")
     p.add_argument("--freeze-observers-epoch", type=int, default=-1,
                    help="Zero-based epoch; -1 updates QAT observers throughout training")
     p.add_argument("--data-root", default="data")
     p.add_argument("--download", action="store_true")
+    p.add_argument("--fixed-train-data", help="Use exported, immutable augmented training tensors")
+    p.set_defaults(fixed_train_hash=None)
     p.add_argument("--output", required=True)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--epochs", type=int, default=300)

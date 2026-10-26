@@ -1,8 +1,19 @@
 """여러 테스트 파일이 함께 쓰는 fixture."""
 import json
+from multiprocessing.connection import Listener
 
 import pytest
 from PIL import Image
+
+
+@pytest.fixture
+def multiprocessing_tensor_sharing():
+    """Require the local socket used to send tensors out of loader workers."""
+    try:
+        with Listener(authkey=b"vitqat-worker-preflight", backlog=128):
+            pass
+    except PermissionError as error:
+        pytest.skip(f"Sandbox forbids worker tensor-sharing sockets: {error}")
 
 
 @pytest.fixture

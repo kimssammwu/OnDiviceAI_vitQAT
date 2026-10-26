@@ -19,12 +19,19 @@ def measure_model(model, args):
     metrics.update(model=args.model, mode=args.mode, use_cropr=args.use_cropr,
                    cropr_pruning_rate=args.cropr_pruning_rate if args.use_cropr else 0,
                    cropr_llf=args.cropr_llf if args.use_cropr else False, qat_scope=args.qat_scope,
-                   weight_bits=args.weight_bits if args.mode == "qat" else 32,
-                   activation_bits=args.activation_bits if args.mode == "qat" else 32)
+                   weight_bits=args.weight_bits if args.mode in ("qat", "ptq") else 32,
+                   activation_bits=args.activation_bits if args.mode in ("qat", "ptq") else 32)
+    if args.mode == "ptq":
+        metrics["ptq_scope"] = args.ptq_scope
     return metrics
 
 
 def main(args):
+    if args.mode == "ptq":
+        from .ptq import run_ptq
+        return run_ptq(args, measure_model=measure_model)
+    if args.fp32_checkpoint:
+        raise ValueError("--fp32-checkpoint requires --mode ptq")
     if args.aux_loss_weight < 0:
         raise ValueError("aux_loss_weight must be nonnegative")
     if args.use_cropr and args.aux_loss_weight == 0:
